@@ -8,8 +8,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    env:
-      ANDROID_HOME: ${{ env.ANDROID_SDK_ROOT }}
 
     steps:
       - name: Checkout
