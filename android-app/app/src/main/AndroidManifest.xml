@@ -5,6 +5,7 @@
 
     <application
         android:allowBackup="true"
+        android:hardwareAccelerated="true"
         android:icon="@android:drawable/ic_menu_gallery"
         android:label="AnimeWorld"
         android:usesCleartextTraffic="true"

@@ -6,8 +6,8 @@ const $form = document.getElementById("searchForm");
 const $input = document.getElementById("searchInput");
 
 function esc(s) {
-  return (s == null ? "" : String(s)).replace(/[&<>"]/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return (s == null ? "" : String(s)).replace(/[&<>"']/g, c =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
 
 async function apiGet(path) {
@@ -34,6 +34,12 @@ function playerHTML(poster, src, originalUrl) {
       <label>Subtitles
         <select id="subTrack"><option value="-1">Off</option></select>
       </label>
+    </div>
+    <div class="dl-bar">
+      <button id="dlBtn" class="btn">&#11015; Download for offline</button>
+      <button id="fsBtn" class="btn">&#9974; Fullscreen</button>
+      <button id="extBtn" class="btn">&#9658;&#65039; External player</button>
+      <span id="dlProg" class="muted"></span>
     </div>
     ${fallback}`;
 }
@@ -131,6 +137,47 @@ function initPlayer(video, src) {
   }
 }
 
+// ---- Fullscreen + external-player helpers ----
+function enterFullscreen() {
+  const v = document.getElementById("player");
+  if (!v) return;
+  try {
+    if (v.requestFullscreen) { v.requestFullscreen(); return; }
+  } catch (e) {}
+  try {
+    if (v.webkitEnterFullscreen) { v.webkitEnterFullscreen(); return; }
+  } catch (e) {}
+  try {
+    if (v.webkitRequestFullscreen) { v.webkitRequestFullscreen(); }
+  } catch (e) {}
+}
+
+async function openExternal(masterRaw) {
+  if (!masterRaw) return;
+  try {
+    const r = await fetch("/api/v1/ext_url?url=" + encodeURIComponent(masterRaw));
+    const j = await r.json();
+    if (!j.url) throw new Error("no url");
+    if (window.AnimeBridge && window.AnimeBridge.openExternal) {
+      window.AnimeBridge.openExternal(j.url);
+    } else {
+      // Outside the Android app (e.g. desktop) there is no chooser; just open it.
+      location.href = j.url;
+    }
+  } catch (e) {
+    alert("Could not open external player: " + (e.message || e));
+  }
+}
+
+function wireFs(fsId) {
+  const b = document.getElementById(fsId);
+  if (b) b.addEventListener("click", enterFullscreen);
+}
+function wireExt(extId, masterRaw) {
+  const b = document.getElementById(extId);
+  if (b) b.addEventListener("click", () => openExternal(masterRaw));
+}
+
 function cardHTML(item, kind) {
   const poster = item.poster
     ? `<img loading="lazy" src="${esc(item.poster)}" alt="${esc(item.title)}">`
@@ -222,11 +269,12 @@ async function episodePage(slug) {
     $app.innerHTML = `<section class="watch">
         <h1>Episode ${esc(slug)}</h1>
         ${playerHTML(st.poster, st.video_source, st.source_url)}
-        <div class="dl-bar"><button id="dlBtn" class="btn">&#11015; Download for offline</button><span id="dlProg" class="muted"></span></div>
         <div class="epinav" id="epinav"></div>
       </section>`;
     initPlayer(document.getElementById("player"), st.video_source);
     wireDownload("dlBtn", "dlProg", slug, "Episode " + slug, st.poster, st.video_source);
+    wireFs("fsBtn");
+    wireExt("extBtn", st.video_source);
     // Prev/Next/Series nav loads separately (non-blocking).
     const m = slug.match(/^(.*)-\d+x\d+$/);
     const seriesSlug = m ? m[1] : null;
@@ -253,10 +301,11 @@ async function watchPage(url) {
     $app.innerHTML = `<section class="watch">
         <h1>Movie</h1>
         ${playerHTML(st.poster, st.video_source, st.source_url || url)}
-        <div class="dl-bar"><button id="dlBtn" class="btn">&#11015; Download for offline</button><span id="dlProg" class="muted"></span></div>
       </section>`;
     initPlayer(document.getElementById("player"), st.video_source);
     wireDownload("dlBtn", "dlProg", url, "Movie", st.poster, st.video_source);
+    wireFs("fsBtn");
+    wireExt("extBtn", st.video_source);
   } catch (e) { setError(e); }
 }
 
@@ -291,6 +340,7 @@ async function downloadsPage() {
         <div class="cap">${esc(it.title)}</div>
         <div class="dl-actions">
           <a class="navlink" href="#/offline/${encodeURIComponent(it.id)}">Play</a>
+          <button class="navlink ext" data-raw="${esc(it.masterRaw)}">Open with</button>
           <button class="navlink del" data-id="${esc(it.id)}">Delete</button>
         </div>
       </div>`;
@@ -301,6 +351,7 @@ async function downloadsPage() {
       await Downloads.remove(b.dataset.id);
       downloadsPage();
     }));
+    $app.querySelectorAll(".ext").forEach(b => b.addEventListener("click", () => openExternal(b.dataset.raw)));
   } catch (e) { setError(e); }
 }
 
@@ -314,6 +365,8 @@ async function offlinePage(id) {
         ${playerHTML(it.poster, it.masterRaw, "")}
       </section>`;
     initPlayer(document.getElementById("player"), it.masterRaw);
+    wireFs("fsBtn");
+    wireExt("extBtn", it.masterRaw);
   } catch (e) { setError(e); }
 }
 

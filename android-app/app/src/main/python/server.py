@@ -29,6 +29,7 @@ if HERE not in sys.path:
 import anime_client as api
 
 HOST = "0.0.0.0"
+PORT = 8080  # filled in by main(); used to build external-player URLs
 
 
 def _ok(handler, payload, code=200):
@@ -112,6 +113,20 @@ def api_route(path, query):
         if not url:
             return _err(None, "need ?slug= or ?url= or ?series=&season=&episode=")
         return api.episode_stream(episode_url=url)
+
+    if path == "/api/v1/ext_url":
+        # Build the in-app proxied HLS URL and hand it to an external player
+        # (MX Player / VLC). The proxy already bypasses the CDN's Cloudflare
+        # block and serves every playlist + segment from 127.0.0.1, so the
+        # external player gets a fully-localhost HLS it can stream (with audio
+        # tracks) -- no file download / muxing required.
+        raw = _q(query, "url", "")
+        if not raw:
+            return _err(None, "missing ?url=", 400)
+        if not _hls_allowed(raw):
+            return _err(None, "host not allowed", 403)
+        return {"url": "http://127.0.0.1:%d/api/v1/hls?url=%s"
+                       % (PORT, urllib.parse.quote(raw, safe=""))}
 
     return _err(None, f"unknown route: {path}", 404)
 
@@ -265,7 +280,9 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
+    global PORT
     port = int(os.environ.get("PORT", sys.argv[1] if len(sys.argv) > 1 else 8080))
+    PORT = port
     srv = ThreadingHTTPServer((HOST, port), Handler)
     print(f"AnimeWorld (in-app backend) on http://{HOST}:{port}  (Ctrl+C to stop)")
     print(f"  site:  {api.SITE}")
