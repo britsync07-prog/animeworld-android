@@ -1,5 +1,7 @@
-apply plugin: 'com.android.application'
-apply plugin: 'com.chaquo.python'
+plugins {
+    id 'com.android.application' version '8.2.2'
+    id 'com.chaquo.python' version '15.0.1'
+}
 
 android {
     namespace 'com.animeworld'
