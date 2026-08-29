@@ -144,7 +144,19 @@ def api_route(path, query):
         if not _hls_allowed(raw):
             return _err(None, "host not allowed", 403)
         base = "http://%s:%d/api/v1/hls.m3u8?url=" % (_lan_ip(), PORT)
-        return {"url": base + urllib.parse.quote(raw, safe="")}
+        url = base + urllib.parse.quote(raw, safe="")
+        audio_sel = _q(query, "audio", "")
+        if audio_sel:
+            url += "&audio=" + urllib.parse.quote(audio_sel, safe="")
+        return {"url": url}
+
+    if path == "/api/v1/tracks":
+        raw = _q(query, "url", "")
+        if not raw:
+            return _err(None, "missing ?url=", 400)
+        if not _hls_allowed(raw):
+            return _err(None, "host not allowed", 403)
+        return _tracks(raw)
 
     return _err(None, f"unknown route: {path}", 404)
 
@@ -196,6 +208,81 @@ def _rewrite_playlist(text, base_url):
             lines[i] = _hls_proxied(urllib.parse.urljoin(base_url, s))
     return "\n".join(lines)
 
+def _tracks(raw):
+    # Parse the master playlist into audio tracks + video variants (with proxied
+    # URLs) so the frontend can offer a language/quality picker for download and
+    # for external playback.
+    try:
+        text = _hls_fetch(raw).decode("utf-8", "ignore")
+    except Exception as e:  # noqa: BLE001
+        return _err(None, f"{type(e).__name__}: {e}", 502)
+    audio, video = [], []
+    lines = text.split("\n")
+    n = len(lines)
+    i = 0
+    while i < n:
+        ln = lines[i].strip()
+        if ln.startswith("#EXT-X-MEDIA"):
+            if "TYPE=AUDIO" in ln:
+                uri = re.search(r'URI="([^"]*)"', ln)
+                lang = re.search(r'LANGUAGE="([^"]*)"', ln)
+                name = re.search(r'NAME="([^"]*)"', ln)
+                if uri:
+                    audio.append({
+                        "lang": (lang.group(1) if lang else "") or "und",
+                        "name": (name.group(1) if name else (lang.group(1) if lang else "audio")),
+                        "uri": _hls_proxied(urllib.parse.urljoin(raw, uri.group(1))),
+                    })
+        elif ln.startswith("#EXT-X-STREAM-INF"):
+            bw = re.search(r'BANDWIDTH=(\d+)', ln)
+            codecs = re.search(r'CODECS="([^"]*)"', ln)
+            j = i + 1
+            while j < n and not lines[j].strip():
+                j += 1
+            if j < n:
+                vurl = lines[j].strip()
+                video.append({
+                    "bandwidth": int(bw.group(1)) if bw else 0,
+                    "codecs": codecs.group(1) if codecs else "",
+                    "uri": _hls_proxied(urllib.parse.urljoin(raw, vurl)),
+                })
+        i += 1
+    video.sort(key=lambda v: v["bandwidth"])
+    return {"audio": audio, "video": video}
+
+
+def _filter_master(text, sel):
+    # Keep only the chosen audio track (or all if sel == "*"). Used so an
+    # external player opens with the requested language by default.
+    lines = text.split("\n")
+    keep = None
+    if sel and sel != "*":
+        s = sel.lower()
+        for ln in lines:
+            if ln.strip().startswith("#EXT-X-MEDIA") and "TYPE=AUDIO" in ln:
+                lang = re.search(r'LANGUAGE="([^"]*)"', ln)
+                name = re.search(r'NAME="([^"]*)"', ln)
+                lval = ((lang.group(1) if lang else "") or (name.group(1) if name else "")).lower()
+                if s in lval or lval in s:
+                    uri = re.search(r'URI="([^"]*)"', ln)
+                    if uri:
+                        keep = {uri.group(1)}
+                    break
+    out = []
+    for ln in lines:
+        st = ln.strip()
+        if st.startswith("#EXT-X-MEDIA") and "TYPE=AUDIO" in st:
+            if keep is None:
+                out.append(ln)
+            else:
+                uri = re.search(r'URI="([^"]*)"', st)
+                if uri and uri.group(1) in keep:
+                    out.append(ln)
+        else:
+            out.append(ln)
+    return "\n".join(out)
+
+
 def _guess_seg_ctype(url):
     ext = url.split("?")[0].rsplit(".", 1)[-1].lower()
     return {
@@ -234,6 +321,9 @@ def _hls(handler, parsed):
         raw = raw.encode("utf-8")
     text = raw.decode("utf-8", "ignore")
     if text.lstrip().startswith("#EXTM3U"):
+        audio_sel = _q(query, "audio", "")
+        if audio_sel:
+            text = _filter_master(text, audio_sel)
         out = _rewrite_playlist(text, target)
         ctype = "application/vnd.apple.mpegurl; charset=utf-8"
         _HLS_CACHE[target] = (now, out.encode("utf-8"), ctype)
