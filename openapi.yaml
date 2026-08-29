@@ -1,0 +1,226 @@
+openapi: 3.0.3
+info:
+  title: watchanimeworld Platform API (clone)
+  description: >
+    Clean JSON API layer over the watchanimeworld.one TaroFilm/zephyrix site.
+    Reverse-engineered and verified live. The server proxies the upstream and
+    returns the signed HLS URL + poster so a browser player can stream directly.
+  version: "1.0.0"
+servers:
+  - url: http://127.0.0.1:8000
+    description: local dev server (python server/app.py 8000)
+
+paths:
+  /api/v1/health:
+    get:
+      summary: Service health
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string }
+                  site: { type: string }
+                  player: { type: string }
+
+  /api/v1/search:
+    get:
+      summary: Search series by name
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20 }
+      responses:
+        "200":
+          description: Matching series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SeriesSummary"
+
+  /api/v1/feed:
+    get:
+      summary: Homepage-style feed (newest / trending / movies)
+      parameters:
+        - name: type
+          in: query
+          schema: { type: string, enum: [newest, trending, movies], default: newest }
+        - name: category
+          in: query
+          schema: { type: string, default: all }
+        - name: page
+          in: query
+          schema: { type: integer, default: 1 }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 25 }
+      responses:
+        "200":
+          description: Feed items with posters
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/FeedItem"
+
+  /api/v1/categories:
+    get:
+      summary: Genre / category slugs
+      parameters:
+        - name: per_page
+          in: query
+          schema: { type: integer, default: 100 }
+      responses:
+        "200":
+          description: Categories
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    name: { type: string }
+                    slug: { type: string }
+
+  /api/v1/series:
+    get:
+      summary: Series detail (post_id + seasons)
+      parameters:
+        - name: slug
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Series
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Series"
+
+  /api/v1/seasons:
+    get:
+      summary: All seasons with their episodes
+      parameters:
+        - name: slug
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        "200":
+          description: Seasons map
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  slug: { type: string }
+                  title: { type: string }
+                  seasons:
+                    type: object
+                    additionalProperties:
+                      type: array
+                      items: { $ref: "#/components/schemas/Episode" }
+
+  /api/v1/episodes:
+    get:
+      summary: Episodes for one season
+      parameters:
+        - name: slug
+          in: query
+          required: true
+          schema: { type: string }
+        - name: season
+          in: query
+          required: true
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Episodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Episode" }
+
+  /api/v1/stream:
+    get:
+      summary: Signed HLS stream + poster for an episode
+      parameters:
+        - name: slug
+          in: query
+          schema: { type: string, description: "episode slug" }
+        - name: url
+          in: query
+          schema: { type: string, description: "full episode url" }
+        - name: series
+          in: query
+          schema: { type: string }
+        - name: season
+          in: query
+          schema: { type: integer }
+        - name: episode
+          in: query
+          schema: { type: integer }
+      responses:
+        "200":
+          description: Stream info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Stream" }
+        "502":
+          description: Upstream error
+
+components:
+  schemas:
+    SeriesSummary:
+      type: object
+      properties:
+        title: { type: string }
+        slug: { type: string }
+        url: { type: string }
+    FeedItem:
+      type: object
+      properties:
+        title: { type: string }
+        slug: { type: string }
+        url: { type: string }
+        poster: { type: string, nullable: true }
+    Series:
+      type: object
+      properties:
+        slug: { type: string }
+        title: { type: string }
+        post_id: { type: string, nullable: true }
+        seasons:
+          type: array
+          items: { type: integer }
+    Episode:
+      type: object
+      properties:
+        season: { type: integer }
+        episode: { type: integer }
+        slug: { type: string }
+        url: { type: string }
+    Stream:
+      type: object
+      properties:
+        player_id: { type: string }
+        hls: { type: boolean }
+        video_source: { type: string, nullable: true }
+        secured_link: { type: string, nullable: true }
+        poster: { type: string, nullable: true }
+        download_links:
+          type: array
+          items: { type: string }

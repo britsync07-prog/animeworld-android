@@ -1,0 +1,15 @@
+{
+  "name": "AnimeWorld",
+  "short_name": "AnimeWorld",
+  "description": "Stream and download anime. Browse, watch, and save episodes for offline playback.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0e1118",
+  "theme_color": "#0e1118",
+  "icons": [
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}

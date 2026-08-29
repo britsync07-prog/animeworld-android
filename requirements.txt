@@ -1,0 +1,2 @@
+# AnimeWorld server is pure Python standard library — no third-party deps required.
+# (Kept for compatibility with hosts that expect requirements.txt.)

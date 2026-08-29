@@ -1,0 +1,33 @@
+apply plugin: 'com.android.application'
+apply plugin: 'com.chaquo.python'
+
+android {
+    namespace 'com.animeworld'
+    compileSdk 34
+    ndkVersion "25.1.8937393"
+
+    defaultConfig {
+        applicationId "com.animeworld"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+python {
+    version "3.11"
+    pip {
+        // stdlib only -- no third-party packages needed
+    }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'com.google.android.material:material:1.11.0'
+}

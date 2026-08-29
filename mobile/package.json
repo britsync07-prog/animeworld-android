@@ -1,0 +1,19 @@
+{
+  "name": "animeworld-mobile",
+  "version": "1.0.0",
+  "description": "AnimeWorld mobile app — Capacitor wrapper around the PWA in ../web (browse, stream, and download anime for offline).",
+  "private": true,
+  "scripts": {
+    "sync": "cap sync",
+    "android": "cap add android && cap sync && cap open android",
+    "ios": "cap add ios && cap sync && cap open ios",
+    "build:android": "cap build android",
+    "build:ios": "cap build ios"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^5.0.0",
+    "@capacitor/core": "^5.0.0",
+    "@capacitor/android": "^5.0.0",
+    "@capacitor/ios": "^5.0.0"
+  }
+}

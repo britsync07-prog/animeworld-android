@@ -1,0 +1,14 @@
+# Render.com free-tier deploy config for AnimeWorld.
+# Usage: push this folder to GitHub, then "New -> Web Service -> connect repo".
+# Render injects $PORT automatically; server/app.py reads it.
+services:
+  - type: web
+    name: animeworld
+    runtime: python
+    plan: free
+    region: oregon        # pick the region nearest you
+    branch: main
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python server/app.py"
+    healthCheckPath: "/api/v1/health"
+    autoDeploy: true

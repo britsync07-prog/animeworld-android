@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+.hermes/
+
+# Android / Gradle
+.gradle/
+build/
+local.properties
+*.apk
+*.aab
+captures/
+
+# Node
+node_modules/
+
+# OS / misc
+.DS_Store
+*.log
+Thumbs.db
