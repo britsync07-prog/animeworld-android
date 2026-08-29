@@ -16,6 +16,7 @@ import json
 import mimetypes
 import os
 import re
+import socket
 import sys
 import time
 import urllib.parse
@@ -30,6 +31,21 @@ import anime_client as api
 
 HOST = "0.0.0.0"
 PORT = 8080  # filled in by main(); used to build external-player URLs
+
+
+def _lan_ip():
+    # Best-effort device IP so an external player (a *different* app) can reach the
+    # in-app proxy. 127.0.0.1 is per-app isolated on modern Android, so we use the
+    # LAN/cellular IP instead; the proxy binds 0.0.0.0 and answers on every interface.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return "127.0.0.1"
 
 
 def _ok(handler, payload, code=200):
@@ -117,16 +133,18 @@ def api_route(path, query):
     if path == "/api/v1/ext_url":
         # Build the in-app proxied HLS URL and hand it to an external player
         # (MX Player / VLC). The proxy already bypasses the CDN's Cloudflare
-        # block and serves every playlist + segment from 127.0.0.1, so the
-        # external player gets a fully-localhost HLS it can stream (with audio
-        # tracks) -- no file download / muxing required.
+        # block and serves every playlist + segment, so the external player gets
+        # a fully-local HLS it can stream (with audio tracks) -- no file download
+        # / muxing required. We point at the device's LAN IP (not 127.0.0.1,
+        # which is per-app isolated) and use a .m3u8 path so players treat it as
+        # a playlist rather than a raw file.
         raw = _q(query, "url", "")
         if not raw:
             return _err(None, "missing ?url=", 400)
         if not _hls_allowed(raw):
             return _err(None, "host not allowed", 403)
-        return {"url": "http://127.0.0.1:%d/api/v1/hls?url=%s"
-                       % (PORT, urllib.parse.quote(raw, safe=""))}
+        base = "http://%s:%d/api/v1/hls.m3u8?url=" % (_lan_ip(), PORT)
+        return {"url": base + urllib.parse.quote(raw, safe="")}
 
     return _err(None, f"unknown route: {path}", 404)
 
@@ -260,7 +278,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
-        if parsed.path == "/api/v1/hls":
+        if parsed.path == "/api/v1/hls" or parsed.path == "/api/v1/hls.m3u8":
             _hls(self, parsed)
             return
         if parsed.path.startswith("/api/"):

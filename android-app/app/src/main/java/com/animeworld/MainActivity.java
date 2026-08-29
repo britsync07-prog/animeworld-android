@@ -150,7 +150,7 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> {
                 try {
                     Intent intent = new Intent(Intent.ACTION_VIEW);
-                    intent.setDataAndType(Uri.parse(url), "video/*");
+                    intent.setDataAndType(Uri.parse(url), "application/x-mpegURL");
                     intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
                     startActivity(Intent.createChooser(intent, "Play with"));
                 } catch (Exception ignored) {
