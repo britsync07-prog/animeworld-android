@@ -1,21 +1,49 @@
-// AnimeWorld offline download manager.
-// Downloads a full HLS episode (video variant + all audio tracks + every segment)
-// into the Service Worker's "animeworld-hls-offline" cache, and records metadata
-// in IndexedDB so the Downloads screen can list / play / delete them offline.
+// AnimeWorld offline download manager, with a concurrency-limited background queue.
 //
-// Exposed as window.Downloads.
+// Downloads a full HLS episode (video variant + all audio tracks + every segment)
+// into the Service Worker's "animeworld-hls-offline" cache, and records metadata in
+// IndexedDB so the Downloads screen can list / play / delete them offline.
+//
+// Background behaviour: up to MAX_CONCURRENT episodes download at the same time; the
+// rest are queued and start automatically as slots free up. The WebView keeps fetching
+// while you browse other pages, and the Android side runs a foreground service (with a
+// wake-lock) so downloads survive the app being minimised. Exposed as window.Downloads.
 
 const Downloads = (function () {
   const OFFLINE = "animeworld-hls-offline";
   const DB = "animeworld";
   const STORE = "downloads";
+  const MAX_CONCURRENT = 3;
 
+  // ---- queue state ----
+  let active = 0;
+  const pending = [];
+  const states = {}; // id -> { status: 'queued'|'downloading'|'done'|'error', title }
+
+  function notifyNative() {
+    try {
+      if (window.AnimeBridge && window.AnimeBridge.setDownloadService)
+        window.AnimeBridge.setDownloadService(active > 0);
+    } catch (e) { /* bridge only exists inside the app */ }
+  }
+
+  function status() {
+    const activeTitles = [], queuedTitles = [];
+    for (const id in states) {
+      const s = states[id];
+      if (s.status === "downloading") activeTitles.push(s.title);
+      else if (s.status === "queued") queuedTitles.push(s.title);
+    }
+    return { active, queued: pending.length, activeTitles, queuedTitles };
+  }
+
+  // ---- IndexedDB helpers ----
   function openDB() {
     return new Promise(function (res, rej) {
       const r = indexedDB.open(DB, 1);
       r.onupgradeneeded = function () { r.result.createObjectStore(STORE, { keyPath: "id" }); };
-      r.onsuccess = function () { res(r.result); };
       r.onerror = function () { rej(r.error); };
+      r.onsuccess = function () { res(r.result); };
     });
   }
   function idbAll() {
@@ -72,24 +100,33 @@ const Downloads = (function () {
     return plText.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
   }
 
-  async function cachePut(url) {
-    const c = await caches.open(OFFLINE);
-    const hit = await c.match(url, { ignoreVary: true });
-    if (hit) return false;
-    const r = await fetch(url);
-    if (!r.ok) throw new Error("HTTP " + r.status + " for " + url);
-    await c.put(url, r.clone());
-    return true;
+  // Fetch + cache one URL, retrying a few times so a single flaky segment doesn't
+  // abort the whole episode. Returns false if it was already cached.
+  async function cachePut(url, tries) {
+    tries = tries || 4;
+    for (let attempt = 1; attempt <= tries; attempt++) {
+      try {
+        const c = await caches.open(OFFLINE);
+        const hit = await c.match(url, { ignoreVary: true });
+        if (hit) return false;
+        const r = await fetch(url);
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        await c.put(url, r.clone());
+        return true;
+      } catch (e) {
+        if (attempt >= tries) throw e;
+        await new Promise(r => setTimeout(r, 300 * attempt));
+      }
+    }
+    return false;
   }
 
-  // id: stable key (episode slug, or encoded movie url)
-  // masterRaw: the raw HLS master URL (video_source) as returned by /api/v1/stream
-  async function download(id, title, poster, masterRaw, onProgress) {
+  // The actual work for one episode. Picks a phone-sensible quality (~720p), gathers
+  // every segment URL (video + audio tracks), downloads them into the SW cache.
+  async function downloadInner(id, title, poster, masterRaw, onProgress) {
     const masterUrl = proxied(masterRaw);
     const masterText = await fetchText(masterUrl);
 
-    // Pick a phone-sensible quality (~720p). The highest-bandwidth variant is
-    // several times larger; for offline storage + download time 720p is ideal.
     const TARGET = 800000;
     const lines = masterText.split("\n");
     let best = null, bestDiff = Infinity;
@@ -104,7 +141,6 @@ const Downloads = (function () {
     const nonTag = lines.filter(l => l && l[0] !== "#");
     const variantUrl = best || (nonTag.length ? nonTag[0] : masterUrl);
 
-    // All audio-track playlists (so offline language switching works too).
     const audioUris = [];
     const audioRe = /TYPE=AUDIO[^#]*URI="([^"]*)"/g;
     let mm;
@@ -131,7 +167,7 @@ const Downloads = (function () {
     for (let j = 0; j < all.length; j += CONC) {
       const batch = all.slice(j, j + CONC);
       await Promise.all(batch.map(async (u) => {
-        try { await cachePut(u); } catch (e) { /* skip a bad segment */ }
+        try { await cachePut(u); } catch (e) { /* skip a bad segment after retries */ }
       }));
       done += batch.length;
       if (onProgress) onProgress(done, all.length);
@@ -145,6 +181,44 @@ const Downloads = (function () {
     return { id: id, segments: all.length };
   }
 
+  // ---- queue driver ----
+  function pump() {
+    while (active < MAX_CONCURRENT && pending.length) {
+      const task = pending.shift();
+      active++;
+      states[task.id] = { status: "downloading", title: task.title };
+      notifyNative();
+      (async () => {
+        try {
+          const r = await downloadInner(task.id, task.title, task.poster, task.masterRaw, task.onProgress);
+          states[task.id] = { status: "done", title: task.title };
+          task.resolve(r);
+        } catch (e) {
+          states[task.id] = { status: "error", title: task.title };
+          task.reject(e);
+        } finally {
+          active--;
+          notifyNative();
+          pump();
+        }
+      })();
+    }
+  }
+
+  // Public: queue an episode for download (max MAX_CONCURRENT concurrent).
+  function enqueue(id, title, poster, masterRaw, onProgress) {
+    const cur = states[id];
+    if (cur && (cur.status === "downloading" || cur.status === "done")) {
+      if (onProgress) onProgress(0, 0);
+      return Promise.resolve({ id, segments: 0, already: true });
+    }
+    states[id] = { status: "queued", title: title };
+    return new Promise((resolve, reject) => {
+      pending.push({ id, title, poster, masterRaw, onProgress, resolve, reject });
+      pump();
+    });
+  }
+
   async function list() { return idbAll(); }
   async function get(id) { return idbGet(id); }
   async function remove(id) {
@@ -156,7 +230,8 @@ const Downloads = (function () {
       }
     }
     await idbDel(id);
+    delete states[id];
   }
 
-  return { download, list, get, remove, proxied };
+  return { enqueue, download: enqueue, list, get, remove, proxied, status };
 })();

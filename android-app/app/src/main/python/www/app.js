@@ -19,6 +19,14 @@ async function apiGet(path) {
 function setLoading(m) { $app.innerHTML = `<div class="center">${esc(m || "Loading...")}</div>`; }
 function setError(e) { $app.innerHTML = `<div class="center error">Error: ${esc(e.message || e)}</div>`; }
 
+function dlStatusText(st) {
+  if (st.active === 0 && st.queued === 0) return "No active downloads.";
+  let s = `Active: ${st.active}`;
+  if (st.activeTitles.length) s += " (" + st.activeTitles.join(", ") + ")";
+  if (st.queued > 0) s += ` · Queued: ${st.queued}`;
+  return s;
+}
+
 function playerHTML(poster, src, originalUrl) {
   const proxied = src ? "/api/v1/hls?url=" + encodeURIComponent(src) : "";
   const fallback = originalUrl
@@ -316,8 +324,11 @@ function wireDownload(btnId, progId, id, title, poster, masterRaw) {
     btn.disabled = true;
     const prog = document.getElementById(progId);
     try {
-      const r = await Downloads.download(id, title, poster, masterRaw, (d, t) => { if (prog) prog.textContent = `Downloading ${d}/${t}`; });
-      if (prog) prog.textContent = `Saved offline ✓ (${r.segments} files)`;
+      if (prog) prog.textContent = "Queued…";
+      const r = await Downloads.enqueue(id, title, poster, masterRaw, (d, t) => {
+        if (prog) prog.textContent = `Downloading ${d}/${t}`;
+      });
+      if (prog) prog.textContent = r.already ? "Already saved ✓" : `Saved offline ✓ (${r.segments} files)`;
     } catch (e) {
       if (prog) prog.textContent = "Download failed: " + (e.message || e);
       btn.disabled = false;
@@ -329,11 +340,14 @@ async function downloadsPage() {
   setLoading("Loading downloads...");
   try {
     const items = await Downloads.list();
-    if (!items.length) {
+    const st = Downloads.status();
+    if (!items.length && st.active === 0 && st.queued === 0) {
       $app.innerHTML = `<div class="center">No downloads yet.<br>Open an episode or movie and tap <b>Download for offline</b>.</div>`;
       return;
     }
-    let html = `<section class="row"><h2>Your Downloads</h2><div class="grid">`;
+    let html = `<section class="row"><h2>Your Downloads</h2>`;
+    html += `<p class="muted">${dlStatusText(st)}</p>`;
+    html += `<div class="grid">`;
     items.forEach(it => {
       html += `<div class="card">
         <div class="thumb">${it.poster ? `<img loading="lazy" src="${esc(it.poster)}" alt="">` : `<div class="ph">no image</div>`}</div>

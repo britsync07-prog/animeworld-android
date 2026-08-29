@@ -2,6 +2,7 @@ package com.animeworld;
 
 import android.content.Intent;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -97,7 +98,8 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
-        // JS bridge so the frontend can launch an external video player.
+        // JS bridge so the frontend can launch an external video player and tell
+        // the app when background downloads are active.
         webView.addJavascriptInterface(new AnimeBridge(), "AnimeBridge");
 
         // Start the embedded Python backend (server.py) on a background thread.
@@ -140,9 +142,9 @@ public class MainActivity extends AppCompatActivity {
         else super.onBackPressed();
     }
 
-    // Called from JavaScript: open a (localhost HLS) video URL in whatever
-    // external player the user picks (MX Player, VLC, etc.).
+    // Called from JavaScript.
     private class AnimeBridge {
+        // Open a (localhost HLS) video URL in whatever external player the user picks.
         @JavascriptInterface
         public void openExternal(final String url) {
             runOnUiThread(() -> {
@@ -153,6 +155,26 @@ public class MainActivity extends AppCompatActivity {
                     startActivity(Intent.createChooser(intent, "Play with"));
                 } catch (Exception ignored) {
                     // No activity can handle the intent.
+                }
+            });
+        }
+
+        // Start/stop the foreground "download keeper" service so background downloads
+        // survive the app being minimised. Called with `active=true` while any
+        // episode is downloading, `false` once the queue drains.
+        @JavascriptInterface
+        public void setDownloadService(final boolean active) {
+            runOnUiThread(() -> {
+                Intent i = new Intent(MainActivity.this, DownloadKeeperService.class);
+                try {
+                    if (active) {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i);
+                        else startService(i);
+                    } else {
+                        stopService(i);
+                    }
+                } catch (Exception ignored) {
+                    // Service not available (e.g. outside the app shell).
                 }
             });
         }
