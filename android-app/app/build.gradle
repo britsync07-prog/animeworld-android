@@ -1,12 +1,11 @@
 plugins {
     id 'com.android.application' version '8.2.2'
-    id 'com.chaquo.python' version '15.0.1'
+    id 'org.jetbrains.kotlin.android' version '1.9.22'
 }
 
 android {
     namespace 'com.animeworld'
     compileSdk 34
-    ndkVersion "25.1.8937393"
 
     defaultConfig {
         applicationId "com.animeworld"
@@ -14,19 +13,8 @@ android {
         targetSdk 34
         versionCode 1
         versionName "1.0"
-
-        ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'
-        }
-
-        // Chaquopy registers the `python` DSL under defaultConfig.
-        python {
-            version "3.11"
-            pip {
-                // stdlib only -- no third-party packages needed
-            }
-        }
     }
+
     buildTypes {
         release {
             minifyEnabled false

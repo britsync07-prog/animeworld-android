@@ -19,6 +19,22 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Node.js (for React PWA build)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Build React PWA frontend
+        working-directory: android-app/frontend
+        run: |
+          npm install
+          npm run build
+
+      - name: Bundle frontend into Android assets
+        run: |
+          mkdir -p android-app/app/src/main/assets/www
+          cp -r android-app/frontend/dist/* android-app/app/src/main/assets/www/
+
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
 

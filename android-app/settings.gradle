@@ -3,13 +3,11 @@ pluginManagement {
         google()
         mavenCentral()
         gradlePluginPortal()
-        maven { url "https://maven.chaquopy.com" }
     }
 }
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.PREFER_SETTINGS)
     repositories {
-        maven { url "https://maven.chaquopy.com" }
         google()
         mavenCentral()
     }

@@ -1,6 +1,5 @@
 allprojects {
     repositories {
-        maven { url "https://maven.chaquopy.com" }
         google()
         mavenCentral()
     }
