@@ -13,8 +13,10 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.URL
 import java.net.URLDecoder
+import java.net.URLEncoder
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
+import java.util.regex.Matcher
 import java.util.regex.Pattern
 
 class Server(private val context: Context) {
@@ -26,7 +28,7 @@ class Server(private val context: Context) {
     private data class CacheEntry(val timestamp: Long, val data: ByteArray, val ctype: String)
 
     private val hlsCache = ConcurrentHashMap<String, CacheEntry>()
-    private const val HLS_CACHE_TTL = 120L
+    private val HLS_CACHE_TTL = 120L
     private val HLS_ALLOWED = Pattern.compile("^(?:play\\.zephyrix\\.org|s\\d+\\.zn-grid\\d+\\.top|zn-grid\\d+\\.top)$")
     private val executor = Executors.newCachedThreadPool()
 
@@ -527,7 +529,7 @@ class Server(private val context: Context) {
         }
         matcher.appendTail(sb)
         val result = sb.toString()
-        val lines = result.split("\n")
+        val lines = result.split("\n").toMutableList()
         for (i in lines.indices) {
             val s = lines[i].trim()
             if (s.isNotEmpty() && !s.startsWith("#")) {
