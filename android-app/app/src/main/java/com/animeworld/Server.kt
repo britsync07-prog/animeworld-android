@@ -1,30 +1,34 @@
 package com.animeworld
 
 import android.content.Context
-import com.sun.net.httpserver.HttpExchange
-import com.sun.net.httpserver.HttpServer
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.BufferedInputStream
 import java.io.BufferedReader
 import java.io.InputStream
 import java.io.InputStreamReader
+import java.io.OutputStream
 import java.net.HttpURLConnection
 import java.net.InetSocketAddress
+import java.net.ServerSocket
 import java.net.URL
-import java.net.URLEncoder
+import java.net.URLDecoder
 import java.util.concurrent.ConcurrentHashMap
-import java.util.regex.Matcher
+import java.util.concurrent.Executors
 import java.util.regex.Pattern
 
 class Server(private val context: Context) {
-    private lateinit var server: HttpServer
+    private var serverSocket: ServerSocket? = null
     private val port = 8080
+    private var acceptThread: Thread? = null
+    @Volatile private var running = false
 
     private data class CacheEntry(val timestamp: Long, val data: ByteArray, val ctype: String)
 
     private val hlsCache = ConcurrentHashMap<String, CacheEntry>()
     private const val HLS_CACHE_TTL = 120L
     private val HLS_ALLOWED = Pattern.compile("^(?:play\\.zephyrix\\.org|s\\d+\\.zn-grid\\d+\\.top|zn-grid\\d+\\.top)$")
+    private val executor = Executors.newCachedThreadPool()
 
     sealed class Response {
         data class JsonObject(val json: JSONObject) : Response()
@@ -33,150 +37,159 @@ class Server(private val context: Context) {
     }
 
     fun start() {
-        server = HttpServer.create(InetSocketAddress("0.0.0.0", port), 0)
-        server.executor = null
-
-        server.createContext("/") { exchange -> serveStatic(exchange) }
-        server.createContext("/api/v1/health") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/search") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/feed") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/categories") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/series") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/seasons") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/episodes") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/stream") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/ext_url") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/tracks") { exchange -> handleApi(exchange) }
-        server.createContext("/api/v1/hls") { exchange -> handleHls(exchange) }
-        server.createContext("/api/v1/hls.m3u8") { exchange -> handleHls(exchange) }
-
-        server.setLogger(null)
-        server.start()
+        if (running) return
+        running = true
+        serverSocket = ServerSocket()
+        serverSocket?.bind(InetSocketAddress("0.0.0.0", port), 50)
+        acceptThread = Thread {
+            while (running && !serverSocket?.isClosed!!) {
+                try {
+                    val client = serverSocket?.accept() ?: break
+                    executor.execute { handleClient(client) }
+                } catch (e: Exception) {
+                    if (running) e.printStackTrace()
+                }
+            }
+        }.also { it.isDaemon = true; it.start() }
     }
 
-    private fun serveStatic(exchange: HttpExchange) {
-        if (exchange.requestMethod.equals("OPTIONS", ignoreCase = true)) {
-            sendCors(exchange)
-            return
-        }
-        val path = exchange.requestURI.path ?: "/"
-        val assetPath = if (path == "/" || path.isEmpty()) "www/index.html" else "www$path"
-        val sanitized = sanitizeAssetPath(assetPath)
+    fun stop() {
+        running = false
+        try { serverSocket?.close() } catch (_: Exception) {}
+        try { acceptThread?.join(500) } catch (_: Exception) {}
+        executor.shutdownNow()
+    }
 
+    private fun handleClient(client: java.net.Socket) {
+        client.soTimeout = 30000
+        val `in` = BufferedInputStream(client.getInputStream())
+        val out = client.getOutputStream()
+        try {
+            val req = readRequest(`in`) ?: run { writeHttp(out, 400, "text/plain", "Bad Request".toByteArray()); return }
+            val path = req.path
+            val method = req.method
+            val query = req.query
+
+            if (method.equals("OPTIONS", ignoreCase = true)) {
+                writeCors(out, 204)
+                return
+            }
+            if (path == "/api/v1/hls" || path == "/api/v1/hls.m3u8") {
+                handleHls(out, query)
+                return
+            }
+            if (path.startsWith("/api/v1/")) {
+                handleApi(out, path, query)
+                return
+            }
+            if (method == "GET") {
+                serveStatic(out, path)
+                return
+            }
+            writeHttp(out, 405, "text/plain", "Method Not Allowed".toByteArray())
+        } catch (e: Exception) {
+            e.printStackTrace()
+            writeHttp(out, 502, "text/plain", ("${e.javaClass.simpleName}: ${e.message}").toByteArray())
+        } finally {
+            try { out.flush() } catch (_: Exception) {}
+            try { client.close() } catch (_: Exception) {}
+        }
+    }
+
+    private data class Req(val method: String, val path: String, val query: String?)
+
+    private fun readRequest(`in`: InputStream): Req? {
+        val reader = BufferedReader(InputStreamReader(`in`, Charsets.ISO_8859_1))
+        val requestLine = reader.readLine() ?: return null
+        val parts = requestLine.split(" ")
+        if (parts.size < 2) return null
+        val method = parts[0]
+        val fullPath = parts[1]
+        val idx = fullPath.indexOf("?")
+        val path = if (idx >= 0) fullPath.substring(0, idx) else fullPath
+        val query = if (idx >= 0) fullPath.substring(idx + 1) else null
+        // consume headers
+        var line: String
+        while (reader.readLine().also { line = it } != null && line.isNotEmpty()) {
+            // ignore
+        }
+        return Req(method, path, query)
+    }
+
+    private fun serveStatic(out: OutputStream, reqPath: String) {
+        val assetPath = if (reqPath == "/" || reqPath.isEmpty()) "www/index.html" else "www$reqPath"
+        val sanitized = sanitizeAssetPath(assetPath)
         try {
             context.assets.open(sanitized).use { input ->
                 val data = input.readBytes()
-                exchange.responseHeaders["Content-Type"] = guessContentType(path)
-                exchange.responseHeaders["Cache-Control"] = "no-store"
-                addCorsHeaders(exchange.responseHeaders)
-                exchange.sendResponseHeaders(200, data.size.toLong())
-                exchange.responseBody.use { it.write(data) }
-                exchange.close()
+                writeHttp(out, 200, guessContentType(reqPath), data, mapOf("Cache-Control" to "no-store"))
             }
         } catch (e: Exception) {
             try {
                 context.assets.open("www/index.html").use { input ->
                     val data = input.readBytes()
-                    exchange.responseHeaders["Content-Type"] = "text/html"
-                    exchange.responseHeaders["Cache-Control"] = "no-store"
-                    addCorsHeaders(exchange.responseHeaders)
-                    exchange.sendResponseHeaders(200, data.size.toLong())
-                    exchange.responseBody.use { it.write(data) }
-                    exchange.close()
+                    writeHttp(out, 200, "text/html", data, mapOf("Cache-Control" to "no-store"))
                 }
             } catch (e2: Exception) {
-                val msg = "Not Found".toByteArray(Charsets.UTF_8)
-                exchange.responseHeaders["Content-Type"] = "text/plain"
-                addCorsHeaders(exchange.responseHeaders)
-                exchange.sendResponseHeaders(404, msg.size.toLong())
-                exchange.responseBody.use { it.write(msg) }
-                exchange.close()
+                writeHttp(out, 404, "text/plain", "Not Found".toByteArray())
             }
         }
     }
 
-    private fun handleApi(exchange: HttpExchange) {
-        if (exchange.requestMethod.equals("OPTIONS", ignoreCase = true)) {
-            sendCors(exchange)
-            return
-        }
-        if (exchange.requestMethod != "GET") {
-            sendError(exchange, "Method Not Allowed", 405)
-            return
-        }
-        val path = exchange.requestURI.path ?: ""
-        val query = exchange.requestURI.query
+    private fun handleApi(out: OutputStream, path: String, query: String?) {
         try {
             when (val resp = apiRoute(path, query)) {
-                is Response.JsonObject -> sendJson(exchange, resp.json)
-                is Response.JsonArray -> sendJsonArray(exchange, resp.json)
-                is Response.Error -> sendError(exchange, resp.msg, resp.code)
+                is Response.JsonObject -> writeJson(out, 200, resp.json)
+                is Response.JsonArray -> writeJsonArray(out, 200, resp.json)
+                is Response.Error -> writeJson(out, resp.code, JSONObject().put("error", resp.msg))
             }
         } catch (e: Exception) {
-            sendError(exchange, "${e.javaClass.simpleName}: ${e.message}", 502)
+            writeJson(out, 502, JSONObject().put("error", "${e.javaClass.simpleName}: ${e.message}"))
         }
     }
 
-    private fun handleHls(exchange: HttpExchange) {
-        if (exchange.requestMethod.equals("OPTIONS", ignoreCase = true)) {
-            sendCors(exchange)
-            return
-        }
-        if (exchange.requestMethod != "GET") {
-            sendError(exchange, "Method Not Allowed", 405)
-            return
-        }
-        val query = exchange.requestURI.query
+    private fun handleHls(out: OutputStream, query: String?) {
         val target = queryParam(query, "url", "") ?: ""
         if (target.isEmpty()) {
-            sendError(exchange, "missing ?url=", 400)
+            writeJson(out, 400, JSONObject().put("error", "missing ?url="))
             return
         }
         if (!hlsAllowed(target)) {
-            sendError(exchange, "host not allowed", 403)
+            writeJson(out, 403, JSONObject().put("error", "host not allowed"))
             return
         }
-
         val now = System.currentTimeMillis() / 1000
         val cached = hlsCache[target]
         if (cached != null && now - cached.timestamp < HLS_CACHE_TTL) {
-            sendRaw(exchange, cached.data, cached.ctype)
+            writeHttp(out, 200, cached.ctype, cached.data)
             return
         }
-
         try {
             val raw = hlsFetch(target)
             val text = raw.toString(Charsets.UTF_8)
             if (text.trimStart().startsWith("#EXTM3U")) {
                 val audioSel = queryParam(query, "audio", "")
-                val out = if (!audioSel.isNullOrEmpty()) filterMaster(text, audioSel) else text
-                val rewritten = rewritePlaylist(out, target)
+                val outText = if (!audioSel.isNullOrEmpty()) filterMaster(text, audioSel) else text
+                val rewritten = rewritePlaylist(outText, target)
                 val ctype = "application/vnd.apple.mpegurl; charset=utf-8"
                 hlsCache[target] = CacheEntry(now, rewritten.toByteArray(Charsets.UTF_8), ctype)
-                sendRaw(exchange, rewritten.toByteArray(Charsets.UTF_8), ctype)
+                writeHttp(out, 200, ctype, rewritten.toByteArray(Charsets.UTF_8))
             } else {
                 val ctype = guessSegCtype(target)
-                sendRaw(exchange, raw, ctype)
+                writeHttp(out, 200, ctype, raw)
             }
         } catch (e: Exception) {
-            val msg = "${e.javaClass.simpleName}: ${e.message}".toByteArray(Charsets.UTF_8)
-            exchange.responseHeaders["Content-Type"] = "text/plain"
-            addCorsHeaders(exchange.responseHeaders)
-            exchange.sendResponseHeaders(502, msg.size.toLong())
-            exchange.responseBody.use { it.write(msg) }
-            exchange.close()
+            writeJson(out, 502, JSONObject().put("error", "${e.javaClass.simpleName}: ${e.message}"))
         }
     }
 
     private fun apiRoute(path: String, query: String?): Response {
         return when (path) {
-            "/api/v1/health" -> {
-                Response.JsonObject(JSONObject().apply {
-                    put("status", "ok")
-                    put("site", AnimeClient.SITE)
-                    put("player", AnimeClient.PLAYER)
-                })
-            }
+            "/api/v1/health" -> Response.JsonObject(JSONObject().apply {
+                put("status", "ok")
+                put("site", AnimeClient.SITE)
+                put("player", AnimeClient.PLAYER)
+            })
             "/api/v1/search" -> {
                 val q = queryParam(query, "q", "") ?: ""
                 if (q.isEmpty()) return Response.Error("missing ?q=")
@@ -238,9 +251,9 @@ class Server(private val context: Context) {
                 Response.JsonObject(json)
             }
             "/api/v1/episodes" -> {
-                val slug = queryParam(query, "slug", "") ?: ""
+                val slug = queryParam(query, "slug", "")
                 val season = queryParam(query, "season", null)
-                if (slug.isEmpty() || season == null) return Response.Error("missing ?slug= and ?season=")
+                if (slug.isNullOrEmpty() || season == null) return Response.Error("missing ?slug= and ?season=")
                 val s = AnimeClient.series(slug)
                 val postId = s["post_id"] as? String ?: return Response.Error("series not found", 404)
                 val eps = AnimeClient.episodes(postId, season.toInt())
@@ -273,7 +286,7 @@ class Server(private val context: Context) {
                 val raw = queryParam(query, "url", "") ?: ""
                 if (raw.isEmpty()) return Response.Error("missing ?url=", 400)
                 if (!hlsAllowed(raw)) return Response.Error("host not allowed", 403)
-                val base = "http://${lanIp()}:$PORT/api/v1/hls.m3u8?url="
+                val base = "http://${lanIp()}:$port/api/v1/hls.m3u8?url="
                 var url = base + URLEncoder.encode(raw, "UTF-8")
                 val audioSel = queryParam(query, "audio", "")
                 if (!audioSel.isNullOrEmpty()) {
@@ -342,49 +355,51 @@ class Server(private val context: Context) {
         return Response.JsonObject(result)
     }
 
-    private fun addCorsHeaders(headers: com.sun.net.httpserver.Headers) {
-        headers["Access-Control-Allow-Origin"] = listOf("*")
-        headers["Access-Control-Allow-Methods"] = listOf("GET, OPTIONS")
-        headers["Access-Control-Allow-Headers"] = listOf("*")
+    private fun writeHttp(out: OutputStream, code: Int, ctype: String, body: ByteArray, extraHeaders: Map<String, String> = emptyMap()) {
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 $code ${httpReason(code)}\r\n")
+        sb.append("Content-Type: $ctype\r\n")
+        sb.append("Access-Control-Allow-Origin: *\r\n")
+        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n")
+        sb.append("Access-Control-Allow-Headers: *\r\n")
+        extraHeaders.forEach { (k, v) -> sb.append("$k: $v\r\n") }
+        sb.append("Content-Length: ${body.size}\r\n")
+        sb.append("Connection: close\r\n\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.write(body)
+        out.flush()
     }
 
-    private fun sendCors(exchange: HttpExchange) {
-        exchange.responseHeaders["Access-Control-Allow-Origin"] = "*"
-        exchange.responseHeaders["Access-Control-Allow-Methods"] = "GET, OPTIONS"
-        exchange.responseHeaders["Access-Control-Allow-Headers"] = "*"
-        exchange.sendResponseHeaders(204, -1)
-        exchange.close()
-    }
-
-    private fun sendJson(exchange: HttpExchange, json: JSONObject, code: Int = 200) {
+    private fun writeJson(out: OutputStream, code: Int, json: JSONObject) {
         val body = json.toString().toByteArray(Charsets.UTF_8)
-        exchange.responseHeaders["Content-Type"] = "application/json; charset=utf-8"
-        addCorsHeaders(exchange.responseHeaders)
-        exchange.sendResponseHeaders(code, body.size.toLong())
-        exchange.responseBody.use { it.write(body) }
-        exchange.close()
+        writeHttp(out, code, "application/json; charset=utf-8", body)
     }
 
-    private fun sendJsonArray(exchange: HttpExchange, json: JSONArray, code: Int = 200) {
+    private fun writeJsonArray(out: OutputStream, code: Int, json: JSONArray) {
         val body = json.toString().toByteArray(Charsets.UTF_8)
-        exchange.responseHeaders["Content-Type"] = "application/json; charset=utf-8"
-        addCorsHeaders(exchange.responseHeaders)
-        exchange.sendResponseHeaders(code, body.size.toLong())
-        exchange.responseBody.use { it.write(body) }
-        exchange.close()
+        writeHttp(out, code, "application/json; charset=utf-8", body)
     }
 
-    private fun sendError(exchange: HttpExchange, msg: String, code: Int = 400) {
-        val json = JSONObject().put("error", msg)
-        sendJson(exchange, json, code)
+    private fun writeCors(out: OutputStream, code: Int) {
+        val sb = StringBuilder()
+        sb.append("HTTP/1.1 $code ${httpReason(code)}\r\n")
+        sb.append("Access-Control-Allow-Origin: *\r\n")
+        sb.append("Access-Control-Allow-Methods: GET, OPTIONS\r\n")
+        sb.append("Access-Control-Allow-Headers: *\r\n")
+        sb.append("Content-Length: 0\r\n\r\n")
+        out.write(sb.toString().toByteArray(Charsets.ISO_8859_1))
+        out.flush()
     }
 
-    private fun sendRaw(exchange: HttpExchange, data: ByteArray, ctype: String) {
-        exchange.responseHeaders["Content-Type"] = ctype
-        addCorsHeaders(exchange.responseHeaders)
-        exchange.sendResponseHeaders(200, data.size.toLong())
-        exchange.responseBody.use { it.write(data) }
-        exchange.close()
+    private fun httpReason(code: Int): String = when (code) {
+        200 -> "OK"
+        204 -> "No Content"
+        400 -> "Bad Request"
+        403 -> "Forbidden"
+        404 -> "Not Found"
+        405 -> "Method Not Allowed"
+        502 -> "Bad Gateway"
+        else -> "OK"
     }
 
     private fun sanitizeAssetPath(path: String): String {
@@ -438,7 +453,6 @@ class Server(private val context: Context) {
         return default
     }
 
-    @Throws(Exception::class)
     private fun hlsFetch(target: String): ByteArray {
         val conn = URL(target).openConnection() as HttpURLConnection
         conn.requestMethod = "GET"
@@ -457,11 +471,7 @@ class Server(private val context: Context) {
     }
 
     private fun urlJoin(base: String, relative: String): String {
-        return try {
-            URL(URL(base), relative).toString()
-        } catch (e: Exception) {
-            relative
-        }
+        return try { URL(URL(base), relative).toString() } catch (e: Exception) { relative }
     }
 
     private fun hlsProxied(absUrl: String): String {
