@@ -265,11 +265,11 @@ class Server(private val context: Context) {
             }
             "/api/v1/stream" -> {
                 val slug = queryParam(query, "slug", "")
-                val url = queryParam(query, "url", "")
+                val url = queryParam(query, "url", "") ?: ""
+                var streamUrl = url
                 val series = queryParam(query, "series", "")
                 val season = queryParam(query, "season", null)
                 val episode = queryParam(query, "episode", null)
-                var streamUrl = url
                 if (!series.isNullOrEmpty() && !season.isNullOrEmpty() && !episode.isNullOrEmpty()) {
                     val s = AnimeClient.series(series)
                     val postId = s["post_id"] as? String ?: return Response.Error("series not found", 404)
